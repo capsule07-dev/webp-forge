@@ -1,0 +1,62 @@
+WebP Forge
+Copyright 2026 Capsule07
+
+Ce produit est distribué sous licence Apache 2.0. Voir le fichier LICENSE.
+
+
+ORIGINE DU PROJET
+-----------------
+
+WebP Forge est un projet personnel. Il a été conçu et développé en dehors de
+toute mission professionnelle : sans commande ni instruction d'un employeur,
+hors temps de travail, et avec des moyens financés à titre personnel par son
+auteur.
+
+L'outil est mis à disposition gratuitement, en l'état, sans garantie d'aucune
+sorte et sans engagement de support ou de maintenance (voir les sections 7 et 8
+de la licence Apache 2.0).
+
+Toute mention d'un établissement ou d'une organisation dans l'interface signale
+un contexte de déploiement, et non la paternité du travail.
+
+
+CONFIDENTIALITÉ
+---------------
+
+WebP Forge fonctionne intégralement sur le poste de l'utilisateur. L'ensemble
+des traitements d'images s'exécute dans le navigateur. Aucune image, aucune
+donnée et aucune télémétrie n'est transmise à un serveur : l'outil ne nécessite
+ni compte, ni connexion réseau, ni service tiers.
+
+
+COMPOSANTS TIERS
+----------------
+
+Ce fichier unique embarque les composants suivants, chacun conservant sa
+licence d'origine :
+
+* @jsquash/webp 1.5.0 (encodeur WebP compilé en WebAssembly, codecs Squoosh)
+  Licence Apache 2.0
+  https://github.com/jamsinclair/jSquash
+
+* libwebp (bibliothèque WebP sous-jacente)
+  Copyright Google Inc. — Licence BSD 3-Clause
+  https://chromium.googlesource.com/webm/libwebp
+
+* Cropper.js v1.6.2
+  Copyright 2015-present Chen Fengyuan — Licence MIT
+  https://fengyuanchen.github.io/cropperjs
+
+* JSZip v3.10.1
+  Copyright 2009-2016 Stuart Knightley — Licence MIT ou GPLv3
+  https://github.com/Stuk/jszip
+
+* pako (utilisée par JSZip)
+  Licence MIT
+  https://github.com/nodeca/pako
+
+
+CRÉDITS
+-------
+
+Logo : conception Capsule07, vectorisation Ictus.
