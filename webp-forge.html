@@ -1292,7 +1292,8 @@ kbd.pin-kbd{ font-family:var(--font-mono); font-size:12px; background:var(--bg);
             <span class="lbl">Transparent</span>
           </label>
         </div>
-        <div class="hint">La photo entière est mise à l'échelle et centrée, rien n'est coupé. Le cadrage dessiné ci-dessus n'a aucun effet dans ce mode ; seule la rotation est prise en compte.</div>
+        <!-- Texte piloté par setFitMode() : il doit décrire le mode ACTIF, pas toujours "pad" -->
+        <div class="hint" id="cropFitHint"></div>
       </div>
       <label class="checkbox-row" id="cropApplyAllRow" style="margin-top:6px">
         <input type="checkbox" id="cropApplyAll">
@@ -2511,6 +2512,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
       naturalWidth, naturalHeight,
       originalSize: file.size,
       thumbUrl,
+      baseThumbUrl: thumbUrl,  // vignette d'origine, restaurée si le recadrage est retiré
       objectUrl,
       croppedSourceBlob: null,
       cropLabel: null,
@@ -3040,7 +3042,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   const cropDom = {
     overlay: $('#cropModal'), img: $('#cropImage'), title: $('#cropModalTitle'),
     ratioSelect: $('#cropRatioSelect'), applyAllRow: $('#cropApplyAllRow'), applyAllChk: $('#cropApplyAll'),
-    fitModeRow: $('#cropFitModeRow'), bgRow: $('#cropBgRow'), bgColor: $('#cropBgColor'), bgTransparent: $('#cropBgTransparent'),
+    fitModeRow: $('#cropFitModeRow'), fitHint: $('#cropFitHint'), bgRow: $('#cropBgRow'), bgColor: $('#cropBgColor'), bgTransparent: $('#cropBgTransparent'),
     customRow: $('#cropCustomRow'), customW: $('#cropCustomW'), customH: $('#cropCustomH'),
   };
 
@@ -3048,6 +3050,9 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     state.cropFitMode = mode;
     $$('#cropFitModeRow .seg button').forEach(b => b.classList.toggle('active', b.dataset.fitMode === mode));
     cropDom.bgRow.hidden = mode !== 'pad';
+    cropDom.fitHint.textContent = mode === 'pad'
+      ? "La photo entière est mise à l'échelle et centrée, rien n'est coupé. Le cadrage dessiné ci-dessus n'a aucun effet dans ce mode ; seule la rotation est prise en compte."
+      : "Le cadre dessiné ci-dessus est découpé, puis exporté à la taille exacte demandée. Ce qui déborde du cadre est coupé.";
     // Le zoom n'a aucun effet en mode "adapter" (photo entière, pas de sélection) : on le neutralise.
     $('#cropZoomIn').disabled = mode === 'pad';
     $('#cropZoomOut').disabled = mode === 'pad';
@@ -3100,6 +3105,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   $('#cropClear').addEventListener('click', () => {
     const item = state.cropTargetItem; if (!item) return;
     item.croppedSourceBlob = null; item.cropLabel = null;
+    swapThumb(item, item.baseThumbUrl);
     closeCropModal(); renderQueue();
   });
 
@@ -3251,9 +3257,38 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     }
   });
 
+  // Vignette réduite à partir d'un blob déjà recadré. Duplique volontairement le calcul
+  // de l'import (makeItem) : là-bas le bitmap sert aussi à lire les dimensions natives,
+  // et on ne veut pas décoder deux fois chaque image à l'import d'un gros lot.
+  async function buildThumbUrl(blob) {
+    const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    const thumbMax = 420;
+    const scale = Math.min(1, thumbMax / Math.max(bitmap.width, bitmap.height));
+    const tw = Math.max(1, Math.round(bitmap.width * scale));
+    const th = Math.max(1, Math.round(bitmap.height * scale));
+    const c = document.createElement('canvas');
+    c.width = tw; c.height = th;
+    c.getContext('2d').drawImage(bitmap, 0, 0, tw, th);
+    bitmap.close();
+    const out = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.82));
+    return out ? URL.createObjectURL(out) : c.toDataURL('image/jpeg', 0.82);
+  }
+
+  // Remplace la vignette de la file par le résultat du recadrage, en révoquant
+  // l'éventuelle vignette de recadrage précédente (jamais celle d'origine).
+  function swapThumb(item, url) {
+    if (item.thumbUrl && item.thumbUrl !== item.baseThumbUrl && item.thumbUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(item.thumbUrl);
+    }
+    item.thumbUrl = url;
+  }
+
   async function setItemCrop(item, blob, fixed, fitMode) {
     item.croppedSourceBlob = blob;
     item.cropLabel = fixed ? `${fixed.w}×${fixed.h}${fitMode === 'pad' ? ' (fond)' : ''}` : 'libre';
+    // Sans ça la carte garde la vignette d'origine : le recadrage paraît sans effet.
+    try { swapThumb(item, await buildThumbUrl(blob)); }
+    catch (e) { console.error('Vignette de recadrage impossible pour', item.name, e); }
   }
 
   // Applique un recadrage (déjà mis à l'échelle) à une image qui n'a pas de Cropper visible :
@@ -3637,6 +3672,10 @@ ${rows}
   function revokeItemUrls(item) {
     if (item.objectUrl) URL.revokeObjectURL(item.objectUrl);
     if (item.thumbUrl && item.thumbUrl.startsWith('blob:')) URL.revokeObjectURL(item.thumbUrl);
+    // Vignette d'origine conservée en parallèle quand un recadrage est actif
+    if (item.baseThumbUrl && item.baseThumbUrl !== item.thumbUrl && item.baseThumbUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(item.baseThumbUrl);
+    }
   }
 
   function removeItem(id) {
