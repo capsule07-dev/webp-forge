@@ -651,7 +651,10 @@ select.input{ font-family:var(--font-body); cursor:pointer; }
   display:flex; align-items:center; gap:8px; margin-top:14px; flex-wrap:wrap;
   justify-content:space-between;
 }
-.crop-tool-group{ display:flex; gap:6px; }
+.crop-tool-group{ display:flex; gap:6px; align-items:center; }
+/* Dimensions du fichier qui sortira, mises à jour pendant qu'on manipule le cadre */
+.crop-out-size{ font-size:12px; color:var(--text-dim); white-space:nowrap; }
+.crop-out-size b{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; font-weight:600; color:var(--text); }
 
 /* toast */
 .toast-stack{
@@ -1256,6 +1259,8 @@ kbd.pin-kbd{ font-family:var(--font-mono); font-size:12px; background:var(--bg);
               <option value="fixed:1584x396">Couverture 1584×396</option>
             </optgroup>
           </select>
+          <!-- Renseigne les ratios (16:9, 1:1…), dont les dimensions dépendent du cadre dessiné -->
+          <span class="crop-out-size" id="cropOutSize" aria-live="polite"></span>
         </div>
         <div class="crop-tool-group">
           <button class="btn btn-sm" id="cropFill" title="Loger l'image entière dans le cadre — il ne reste qu'à la positionner">Remplir le cadre</button>
@@ -2722,6 +2727,16 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     return best;
   }
 
+  // Dimensions qui entrent réellement dans la conversion : celles de la découpe quand un
+  // recadrage est appliqué, sinon celles de l'original (la chaîne est recadrage →
+  // redimensionnement → encodage). Sans ça, tout ce qui projette la sortie annonce
+  // encore l'image d'avant recadrage.
+  function sourceDimsFor(item) {
+    return (item.cropWidth && item.cropHeight)
+      ? { w: item.cropWidth, h: item.cropHeight }
+      : { w: item.naturalWidth, h: item.naturalHeight };
+  }
+
   // Taille convertie estimée d'une image PAS encore traitée : heuristique par qualité,
   // pondérée par la réduction d'aire due au redimensionnement (sinon on surestime
   // largement dès qu'une réduction en % ou en px est active).
@@ -2729,7 +2744,10 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     const { quality: q, lossless, resize, format } = mergedParamsFor(it);
     let areaFactor = 1;
     if (it.naturalWidth && it.naturalHeight) {
-      const t = capForFormatMain(computeTargetSizeMain(it.naturalWidth, it.naturalHeight, resize), format);
+      // Le dénominateur reste l'aire d'ORIGINE : le facteur pondère `originalSize`,
+      // qui est le poids du fichier importé, recadrage non compris.
+      const src = sourceDimsFor(it);
+      const t = capForFormatMain(computeTargetSizeMain(src.w, src.h, resize), format);
       areaFactor = (t.w * t.h) / (it.naturalWidth * it.naturalHeight);
     }
     return it.originalSize * estimateRatio(q, lossless, format) * areaFactor;
@@ -3025,7 +3043,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   const cropDom = {
     overlay: $('#cropModal'), img: $('#cropImage'), title: $('#cropModalTitle'),
     ratioSelect: $('#cropRatioSelect'), applyAllRow: $('#cropApplyAllRow'), applyAllChk: $('#cropApplyAll'),
-    fixedHintRow: $('#cropFixedHintRow'),
+    fixedHintRow: $('#cropFixedHintRow'), outSize: $('#cropOutSize'),
     customRow: $('#cropCustomRow'), customW: $('#cropCustomW'), customH: $('#cropCustomH'),
   };
 
@@ -3050,6 +3068,30 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     let bw = cv.width, bh = bw / ratio;
     if (bh > cv.height) { bh = cv.height; bw = bh * ratio; }
     cr.setCropBoxData({ left: cv.left + (cv.width - bw) / 2, top: cv.top + (cv.height - bh) / 2, width: bw, height: bh });
+    updateCropOutSize();
+  }
+
+  // Dimensions du fichier qui sortira, rafraîchies pendant qu'on manipule le cadre.
+  // À taille fixe la réponse est connue d'avance, mais avec un ratio (16:9, 1:1…) elle
+  // dépend du cadre dessiné : c'est là qu'on ne pouvait pas la deviner. La conversion
+  // enchaîne recadrage → redimensionnement → encodage, on refait donc la même suite
+  // (sinon le chiffre mentirait dès qu'un redimensionnement global est actif).
+  function updateCropOutSize() {
+    const cr = state.cropper || cropDom.img.cropper;
+    const item = state.cropTargetItem;
+    if (!cr || !cr.ready || !item) { cropDom.outSize.textContent = ''; return; }
+    const fixed = state.cropFixedDims;
+    let w, h;
+    if (fixed) { w = fixed.w; h = fixed.h; }
+    else {
+      const d = cr.getData();
+      w = Math.max(1, Math.round(d.width)); h = Math.max(1, Math.round(d.height));
+    }
+    const { resize, format } = mergedParamsFor(item);
+    const out = capForFormatMain(computeTargetSizeMain(w, h, resize), format);
+    const resized = out.w !== w || out.h !== h;
+    cropDom.outSize.innerHTML = `Sortie : <b>${out.w} × ${out.h}</b> px`
+      + (resized ? ' — redimensionnement appliqué ensuite' : '');
   }
 
   function openCropModal(item, isGlobal) {
@@ -3063,6 +3105,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     cropDom.customRow.hidden = true;
     cropDom.customW.value = ''; cropDom.customH.value = '';
     cropDom.fixedHintRow.hidden = true;
+    cropDom.outSize.textContent = ''; // renseigné par le `ready` de Cropper
     state.lastFocused = document.activeElement;
     cropDom.overlay.hidden = false;
     focusFirstIn(cropDom.overlay);
@@ -3076,6 +3119,10 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
         responsive: true, restore: false, guides: true, center: true, highlight: true,
         cropBoxMovable: true, cropBoxResizable: true, toggleDragModeOnDblclick: false,
         zoomable: true, rotatable: true,
+        // `crop` suit chaque déplacement/redimensionnement du cadre ; `ready` donne la
+        // première valeur (les callbacks peuvent précéder l'affectation de state.cropper).
+        ready: () => updateCropOutSize(),
+        crop: () => updateCropOutSize(),
       });
     });
   }
@@ -3097,8 +3144,9 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   $('#cropClear').addEventListener('click', () => {
     const item = state.cropTargetItem; if (!item) return;
     item.croppedSourceBlob = null; item.cropLabel = null;
+    item.cropWidth = null; item.cropHeight = null; // on repart des dimensions d'origine
     swapThumb(item, item.baseThumbUrl);
-    closeCropModal(); renderQueue();
+    closeCropModal(); renderQueue(); updateStats();
   });
 
   cropDom.ratioSelect.addEventListener('change', () => {
@@ -3117,6 +3165,9 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
       state.cropFixedDims = null;
     }
     cropDom.fixedHintRow.hidden = !state.cropFixedDims;
+    // Passer d'un ratio à une taille fixe peut ne pas bouger le cadre (donc pas
+    // d'événement `crop`) alors que la sortie annoncée, elle, change.
+    updateCropOutSize();
   });
 
   // Mode "Fixe personnalisé" : taille de sortie exacte saisie à la main, façon
@@ -3134,6 +3185,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
       state.cropFixedDims = null;
     }
     cropDom.fixedHintRow.hidden = !state.cropFixedDims;
+    updateCropOutSize();
   }
   [cropDom.customW, cropDom.customH].forEach(input => {
     input.addEventListener('input', () => {
@@ -3176,6 +3228,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
       }
       closeCropModal();
       renderQueue();
+      updateStats(); // renderQueue ne la rappelle pas : sans ça l'estimation reste celle d'avant découpe
     } finally {
       btn.disabled = false; btn.textContent = 'Appliquer';
     }
@@ -3184,18 +3237,21 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   // Vignette réduite à partir d'un blob déjà recadré. Duplique volontairement le calcul
   // de l'import (makeItem) : là-bas le bitmap sert aussi à lire les dimensions natives,
   // et on ne veut pas décoder deux fois chaque image à l'import d'un gros lot.
+  // Renvoie aussi les dimensions du blob : ce décodage est le seul de la découpe,
+  // autant y lire la taille réelle plutôt que de décoder une deuxième fois.
   async function buildThumbUrl(blob) {
     const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
     const thumbMax = 420;
-    const scale = Math.min(1, thumbMax / Math.max(bitmap.width, bitmap.height));
-    const tw = Math.max(1, Math.round(bitmap.width * scale));
-    const th = Math.max(1, Math.round(bitmap.height * scale));
+    const srcW = bitmap.width, srcH = bitmap.height;
+    const scale = Math.min(1, thumbMax / Math.max(srcW, srcH));
+    const tw = Math.max(1, Math.round(srcW * scale));
+    const th = Math.max(1, Math.round(srcH * scale));
     const c = document.createElement('canvas');
     c.width = tw; c.height = th;
     c.getContext('2d').drawImage(bitmap, 0, 0, tw, th);
     bitmap.close();
     const out = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.82));
-    return out ? URL.createObjectURL(out) : c.toDataURL('image/jpeg', 0.82);
+    return { url: out ? URL.createObjectURL(out) : c.toDataURL('image/jpeg', 0.82), w: srcW, h: srcH };
   }
 
   // Remplace la vignette de la file par le résultat du recadrage, en révoquant
@@ -3210,8 +3266,15 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   async function setItemCrop(item, blob, fixed) {
     item.croppedSourceBlob = blob;
     item.cropLabel = fixed ? `${fixed.w}×${fixed.h}` : 'libre';
+    // À taille fixe la découpe est connue d'avance : on la pose tout de suite, pour que
+    // la sortie annoncée soit juste même si la vignette ci-dessous échoue.
+    if (fixed) { item.cropWidth = fixed.w; item.cropHeight = fixed.h; }
     // Sans ça la carte garde la vignette d'origine : le recadrage paraît sans effet.
-    try { swapThumb(item, await buildThumbUrl(blob)); }
+    try {
+      const thumb = await buildThumbUrl(blob);
+      item.cropWidth = thumb.w; item.cropHeight = thumb.h;
+      swapThumb(item, thumb.url);
+    }
     catch (e) { console.error('Vignette de recadrage impossible pour', item.name, e); }
   }
 
@@ -3508,7 +3571,8 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   function outputDims(item) {
     if (item.resultWidth && item.resultHeight) return { w: item.resultWidth, h: item.resultHeight };
     const { resize, format } = mergedParamsFor(item);
-    return capForFormatMain(computeTargetSizeMain(item.naturalWidth, item.naturalHeight, resize), format);
+    const src = sourceDimsFor(item);
+    return capForFormatMain(computeTargetSizeMain(src.w, src.h, resize), format);
   }
 
   // Snippet <img> prêt à coller : bonnes pratiques SEO/perf (width/height anti-"layout
