@@ -1258,6 +1258,7 @@ kbd.pin-kbd{ font-family:var(--font-mono); font-size:12px; background:var(--bg);
           </select>
         </div>
         <div class="crop-tool-group">
+          <button class="btn btn-sm" id="cropFill" title="Loger l'image entière dans le cadre — il ne reste qu'à la positionner">Remplir le cadre</button>
           <button class="btn btn-sm" id="cropZoomIn" title="Zoomer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
           <button class="btn btn-sm" id="cropZoomOut" title="Dézoomer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
           <button class="btn btn-sm" id="cropRotate" title="Rotation 15°"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg></button>
@@ -1275,25 +1276,8 @@ kbd.pin-kbd{ font-family:var(--font-mono); font-size:12px; background:var(--bg);
         </div>
         <div class="hint">Le fichier exporté fera exactement cette taille — le cadre suit ce ratio.</div>
       </div>
-      <div class="field fit-mode-row" id="cropFitModeRow" hidden>
-        <div class="field-label"><span>Comportement à taille fixe</span></div>
-        <div class="seg">
-          <button type="button" class="active" data-fit-mode="fill">Remplir (recadre)</button>
-          <button type="button" data-fit-mode="pad">Adapter + fond (taille exacte)</button>
-        </div>
-        <div class="dim-row" id="cropBgRow" hidden style="margin-top:10px">
-          <label style="display:flex;align-items:center;gap:8px;flex:1;font-size:12px;color:var(--text-dim)">
-            Couleur de fond
-            <input type="color" id="cropBgColor" class="color-swatch" value="#FFFFFF">
-          </label>
-          <label class="checkbox-row small" style="flex:0 0 auto;padding:0">
-            <input type="checkbox" id="cropBgTransparent">
-            <span class="chk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
-            <span class="lbl">Transparent</span>
-          </label>
-        </div>
-        <!-- Texte piloté par setFitMode() : il doit décrire le mode ACTIF, pas toujours "pad" -->
-        <div class="hint" id="cropFitHint"></div>
+      <div class="field" id="cropFixedHintRow" hidden>
+        <div class="hint">Le cadre est découpé puis exporté à la taille exacte demandée — ce qui déborde est coupé. Le bouton « Remplir le cadre » loge l'image entière dans le cadre, il ne reste qu'à la positionner.</div>
       </div>
       <label class="checkbox-row" id="cropApplyAllRow" style="margin-top:6px">
         <input type="checkbox" id="cropApplyAll">
@@ -1764,7 +1748,6 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     cropper: null,          // instance CropperJS active dans la modale
     cropTargetItem: null,   // item de référence en cours de recadrage
     cropFixedDims: null,    // {w,h} si un mode "fixe" est sélectionné
-    cropFitMode: 'fill',    // 'fill' (recadre) | 'pad' (adapter + fond)
     previewItem: null,      // image de référence dans l'aperçu qualité
     previewToken: 0,        // jeton anti-concurrence pour les ré-encodages d'aperçu
     previewOrigScaledKey: null, // "WxH" si l'original affiché a déjà été réduit à ces dimensions
@@ -3042,20 +3025,31 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   const cropDom = {
     overlay: $('#cropModal'), img: $('#cropImage'), title: $('#cropModalTitle'),
     ratioSelect: $('#cropRatioSelect'), applyAllRow: $('#cropApplyAllRow'), applyAllChk: $('#cropApplyAll'),
-    fitModeRow: $('#cropFitModeRow'), fitHint: $('#cropFitHint'), bgRow: $('#cropBgRow'), bgColor: $('#cropBgColor'), bgTransparent: $('#cropBgTransparent'),
+    fixedHintRow: $('#cropFixedHintRow'),
     customRow: $('#cropCustomRow'), customW: $('#cropCustomW'), customH: $('#cropCustomH'),
   };
 
-  function setFitMode(mode) {
-    state.cropFitMode = mode;
-    $$('#cropFitModeRow .seg button').forEach(b => b.classList.toggle('active', b.dataset.fitMode === mode));
-    cropDom.bgRow.hidden = mode !== 'pad';
-    cropDom.fitHint.textContent = mode === 'pad'
-      ? "La photo entière est mise à l'échelle et centrée, rien n'est coupé. Le cadrage dessiné ci-dessus n'a aucun effet dans ce mode ; seule la rotation est prise en compte."
-      : "Le cadre dessiné ci-dessus est découpé, puis exporté à la taille exacte demandée. Ce qui déborde du cadre est coupé.";
-    // Le zoom n'a aucun effet en mode "adapter" (photo entière, pas de sélection) : on le neutralise.
-    $('#cropZoomIn').disabled = mode === 'pad';
-    $('#cropZoomOut').disabled = mode === 'pad';
+  // « Remplir le cadre » (action volontaire, jamais automatique) : remet l'image entière
+  // à l'écran — zoom et déplacement annulés SANS toucher à la rotation (cropper.reset()
+  // la perdrait) — puis inscrit le cadre au ratio courant, le plus grand possible,
+  // centré sur la photo. Il ne reste qu'à positionner l'image ou le cadre.
+  function fillFrame() {
+    const cr = state.cropper;
+    if (!cr || !cr.ready) return; // avant `ready`, les méthodes Cropper sont des no-ops
+    // Cadre réduit d'abord : viewMode 1 interdit un canvas plus petit que le cadre.
+    cr.setCropBoxData({ width: 8, height: 8 });
+    const cont = cr.getContainerData();
+    let cv = cr.getCanvasData();
+    if (!cont.width || !cv.naturalWidth) return;
+    const scale = Math.min(cont.width / cv.naturalWidth, cont.height / cv.naturalHeight);
+    const w = cv.naturalWidth * scale, h = cv.naturalHeight * scale;
+    cr.setCanvasData({ left: (cont.width - w) / 2, top: (cont.height - h) / 2, width: w, height: h });
+    cv = cr.getCanvasData();
+    const dims = state.cropFixedDims;
+    const ratio = dims ? dims.w / dims.h : (cr.options.aspectRatio || cv.width / cv.height);
+    let bw = cv.width, bh = bw / ratio;
+    if (bh > cv.height) { bh = cv.height; bw = bh * ratio; }
+    cr.setCropBoxData({ left: cv.left + (cv.width - bw) / 2, top: cv.top + (cv.height - bh) / 2, width: bw, height: bh });
   }
 
   function openCropModal(item, isGlobal) {
@@ -3068,10 +3062,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     cropDom.ratioSelect.value = 'free';
     cropDom.customRow.hidden = true;
     cropDom.customW.value = ''; cropDom.customH.value = '';
-    cropDom.fitModeRow.hidden = true;
-    cropDom.bgColor.value = '#FFFFFF';
-    cropDom.bgTransparent.checked = false;
-    setFitMode('fill');
+    cropDom.fixedHintRow.hidden = true;
     state.lastFocused = document.activeElement;
     cropDom.overlay.hidden = false;
     focusFirstIn(cropDom.overlay);
@@ -3102,6 +3093,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   $('#cropZoomOut').addEventListener('click', () => state.cropper && state.cropper.zoom(-0.1));
   $('#cropRotate').addEventListener('click', () => state.cropper && state.cropper.rotate(15));
   $('#cropReset').addEventListener('click', () => state.cropper && state.cropper.reset());
+  $('#cropFill').addEventListener('click', fillFrame);
   $('#cropClear').addEventListener('click', () => {
     const item = state.cropTargetItem; if (!item) return;
     item.croppedSourceBlob = null; item.cropLabel = null;
@@ -3124,8 +3116,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
       state.cropper.setAspectRatio(a / b);
       state.cropFixedDims = null;
     }
-    cropDom.fitModeRow.hidden = !state.cropFixedDims;
-    if (!state.cropFixedDims) setFitMode('fill');
+    cropDom.fixedHintRow.hidden = !state.cropFixedDims;
   });
 
   // Mode "Fixe personnalisé" : taille de sortie exacte saisie à la main, façon
@@ -3142,8 +3133,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
       state.cropper.setAspectRatio(NaN);
       state.cropFixedDims = null;
     }
-    cropDom.fitModeRow.hidden = !state.cropFixedDims;
-    if (!state.cropFixedDims) setFitMode('fill');
+    cropDom.fixedHintRow.hidden = !state.cropFixedDims;
   }
   [cropDom.customW, cropDom.customH].forEach(input => {
     input.addEventListener('input', () => {
@@ -3151,103 +3141,37 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     });
   });
 
-  $$('#cropFitModeRow .seg button').forEach(btn => {
-    btn.addEventListener('click', () => setFitMode(btn.dataset.fitMode));
-  });
-  cropDom.bgTransparent.addEventListener('change', () => {
-    cropDom.bgColor.disabled = cropDom.bgTransparent.checked;
-  });
-
-  // Construit un canvas de taille EXACTE targetW×targetH : la photo entière est mise à
-  // l'échelle (contain, avec rotation prise en compte) puis centrée sur un fond uni
-  // (ou transparent). Rien n'est jamais coupé — c'est l'inverse du recadrage "Remplir".
-  function buildPaddedCanvas(imgEl, rotateDeg, targetW, targetH, bgColor, transparent) {
-    const rad = (rotateDeg || 0) * Math.PI / 180;
-    const srcW = imgEl.naturalWidth, srcH = imgEl.naturalHeight;
-    const absCos = Math.abs(Math.cos(rad)), absSin = Math.abs(Math.sin(rad));
-    const boundW = srcW * absCos + srcH * absSin;
-    const boundH = srcW * absSin + srcH * absCos;
-    const canvas = document.createElement('canvas');
-    canvas.width = targetW; canvas.height = targetH;
-    const ctx = canvas.getContext('2d');
-    if (!transparent) { ctx.fillStyle = bgColor; ctx.fillRect(0, 0, targetW, targetH); }
-    const scale = Math.min(targetW / boundW, targetH / boundH);
-    const drawW = srcW * scale, drawH = srcH * scale;
-    ctx.save();
-    ctx.translate(targetW / 2, targetH / 2);
-    ctx.rotate(rad);
-    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(imgEl, -drawW / 2, -drawH / 2, drawW, drawH);
-    ctx.restore();
-    return canvas;
-  }
-
-  function loadImageEl(url) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('décodage impossible'));
-      img.src = url;
-    });
-  }
-
   $('#cropApply').addEventListener('click', async () => {
     const ref = state.cropTargetItem;
     if (!ref || !state.cropper) return;
     const applyAll = cropDom.applyAllChk.checked;
     const fixed = state.cropFixedDims;
-    const fitMode = fixed ? state.cropFitMode : 'fill';
     const btn = $('#cropApply'); btn.disabled = true; btn.textContent = 'Application…';
 
     try {
-      if (fitMode === 'pad') {
-        // Mode "Adapter + fond" : pas de découpe, sortie garantie à fixed.w × fixed.h.
-        const rotate = state.cropper.getData().rotate || 0;
-        const bgColor = cropDom.bgColor.value;
-        const transparent = cropDom.bgTransparent.checked;
+      // Extraction directe via CropperJS ; à taille fixe, la sortie fait exactement fixed.w × fixed.h.
+      const refCanvas = state.cropper.getCroppedCanvas(fixed ? { width: fixed.w, height: fixed.h, imageSmoothingQuality: 'high' } : { imageSmoothingQuality: 'high' });
+      const refBlob = await new Promise(res => refCanvas.toBlob(res, 'image/png'));
+      await setItemCrop(ref, refBlob, fixed);
 
-        const refCanvas = buildPaddedCanvas(cropDom.img, rotate, fixed.w, fixed.h, bgColor, transparent);
-        const refBlob = await new Promise(res => refCanvas.toBlob(res, 'image/png'));
-        await setItemCrop(ref, refBlob, fixed, 'pad');
+      if (applyAll) {
+        const data = state.cropper.getData(); // coordonnées dans l'image ORIGINALE (non tournée)
+        const rx = data.x / ref.naturalWidth, ry = data.y / ref.naturalHeight;
+        const rw = data.width / ref.naturalWidth, rh = data.height / ref.naturalHeight;
+        const targets = (state.queue.some(i => i.selected) ? state.queue.filter(i => i.selected) : state.queue)
+          .filter(i => i.id !== ref.id);
 
-        if (applyAll) {
-          const targets = (state.queue.some(i => i.selected) ? state.queue.filter(i => i.selected) : state.queue)
-            .filter(i => i.id !== ref.id);
-          toast(`Application du recadrage à ${targets.length} image(s)…`, 'success');
-          for (const it of targets) {
-            try {
-              const imgEl = await loadImageEl(it.objectUrl);
-              const canvas = buildPaddedCanvas(imgEl, rotate, fixed.w, fixed.h, bgColor, transparent);
-              const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
-              await setItemCrop(it, blob, fixed, 'pad');
-            } catch (e) { console.error('Adaptation échouée pour', it.name, e); }
-          }
-        }
-      } else {
-        // Mode "Remplir" (comportement historique) : extraction directe via CropperJS.
-        const refCanvas = state.cropper.getCroppedCanvas(fixed ? { width: fixed.w, height: fixed.h, imageSmoothingQuality: 'high' } : { imageSmoothingQuality: 'high' });
-        const refBlob = await new Promise(res => refCanvas.toBlob(res, 'image/png'));
-        await setItemCrop(ref, refBlob, fixed);
-
-        if (applyAll) {
-          const data = state.cropper.getData(); // coordonnées dans l'image ORIGINALE (non tournée)
-          const rx = data.x / ref.naturalWidth, ry = data.y / ref.naturalHeight;
-          const rw = data.width / ref.naturalWidth, rh = data.height / ref.naturalHeight;
-          const targets = (state.queue.some(i => i.selected) ? state.queue.filter(i => i.selected) : state.queue)
-            .filter(i => i.id !== ref.id);
-
-          toast(`Application du recadrage à ${targets.length} image(s)…`, 'success');
-          for (const it of targets) {
-            const scaled = {
-              x: rx * it.naturalWidth, y: ry * it.naturalHeight,
-              width: rw * it.naturalWidth, height: rh * it.naturalHeight,
-              rotate: data.rotate, scaleX: data.scaleX, scaleY: data.scaleY,
-            };
-            try {
-              const blob = await cropOtherImage(it, scaled, fixed);
-              await setItemCrop(it, blob, fixed);
-            } catch (e) { console.error('Crop échoué pour', it.name, e); }
-          }
+        toast(`Application du recadrage à ${targets.length} image(s)…`, 'success');
+        for (const it of targets) {
+          const scaled = {
+            x: rx * it.naturalWidth, y: ry * it.naturalHeight,
+            width: rw * it.naturalWidth, height: rh * it.naturalHeight,
+            rotate: data.rotate, scaleX: data.scaleX, scaleY: data.scaleY,
+          };
+          try {
+            const blob = await cropOtherImage(it, scaled, fixed);
+            await setItemCrop(it, blob, fixed);
+          } catch (e) { console.error('Crop échoué pour', it.name, e); }
         }
       }
       closeCropModal();
@@ -3283,9 +3207,9 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     item.thumbUrl = url;
   }
 
-  async function setItemCrop(item, blob, fixed, fitMode) {
+  async function setItemCrop(item, blob, fixed) {
     item.croppedSourceBlob = blob;
-    item.cropLabel = fixed ? `${fixed.w}×${fixed.h}${fitMode === 'pad' ? ' (fond)' : ''}` : 'libre';
+    item.cropLabel = fixed ? `${fixed.w}×${fixed.h}` : 'libre';
     // Sans ça la carte garde la vignette d'origine : le recadrage paraît sans effet.
     try { swapThumb(item, await buildThumbUrl(blob)); }
     catch (e) { console.error('Vignette de recadrage impossible pour', item.name, e); }
