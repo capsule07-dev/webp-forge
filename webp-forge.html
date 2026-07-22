@@ -510,6 +510,7 @@ select.input{ font-family:var(--font-body); cursor:pointer; }
 .card-meta .arrow{ color:var(--text-faint); }
 .card-meta .new-size{ color:var(--text); }
 .card-meta .gain{ color:var(--success); font-weight:600; }
+.card-meta .loss{ color:var(--danger); font-weight:600; }
 .card-meta .target-miss{ color:var(--warning); font-weight:600; }
 
 .card-actions{
@@ -2420,6 +2421,80 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
     return file.type || MIME_BY_EXT[ext] || '';
   }
 
+  /* --- SVG : rastérisation à l'import -------------------------------------------
+     Le SVG n'est décodable NI par createImageBitmap (Firefox l'exige avec des
+     dimensions intrinsèques, Safari ne le gère pas du tout), NI dans un worker
+     (pas de DOM, donc pas de moteur de rendu SVG). Seul Chrome s'en sortait, ce qui
+     masquait le trou. On le rastérise donc une fois pour toutes à l'import, dans le
+     thread principal : worker, aperçu, recadrage et comparateur ne voient ensuite
+     qu'un PNG ordinaire, et le reste de la chaîne est inchangé.
+     Taille de sortie = dimensions intrinsèques, sinon viewBox (un SVG n'a pas de
+     résolution propre) ; le redimensionnement global s'applique ensuite comme partout. */
+
+  const SVG_RASTER_MAX = 4096;   // garde-fou mémoire sur un viewBox démesuré
+
+  // Dimensions à donner au raster : width/height s'ils sont exploitables, sinon viewBox.
+  function svgIntrinsicSize(text) {
+    const root = text.match(/<svg\b[^>]*>/i);
+    if (!root) return { w: 0, h: 0 };
+    const tag = root[0];
+    const attr = (n) => {
+      const m = tag.match(new RegExp('\\s' + n + '\\s*=\\s*["\']([^"\']*)["\']', 'i'));
+      return m ? m[1] : '';
+    };
+    // width/height peuvent porter une unité (px, pt, mm…) : seul le nombre nous
+    // intéresse. Un pourcentage, lui, ne donne aucune taille exploitable → viewBox.
+    const num = (v) => (/%/.test(v) ? 0 : Math.round(parseFloat(v) || 0));
+    let w = num(attr('width')), h = num(attr('height'));
+    if (!w || !h) {
+      const vb = attr('viewBox').trim().split(/[\s,]+/).map(Number);
+      if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) { w = Math.round(vb[2]); h = Math.round(vb[3]); }
+    }
+    const big = Math.max(w, h);
+    if (big > SVG_RASTER_MAX) {
+      const k = SVG_RASTER_MAX / big;
+      w = Math.max(1, Math.round(w * k)); h = Math.max(1, Math.round(h * k));
+    }
+    return { w, h };
+  }
+
+  // Réécrit width/height sur la balise racine : sans dimensions intrinsèques, Firefox
+  // dessine un SVG en 0×0. On écrase l'existant (une valeur en % ne sert à rien ici).
+  function ensureSvgSize(text, w, h) {
+    return text.replace(/<svg\b([^>]*?)(\/?)>/i, (full, attrs, selfClose) => {
+      const cleaned = attrs
+        .replace(/\swidth\s*=\s*["'][^"']*["']/i, '')
+        .replace(/\sheight\s*=\s*["'][^"']*["']/i, '');
+      return `<svg${cleaned} width="${w}" height="${h}"${selfClose}>`;
+    });
+  }
+
+  async function rasterizeSvg(file) {
+    const text = await file.text();
+    const { w, h } = svgIntrinsicSize(text);
+    if (!w || !h) throw new Error('dimensions du SVG introuvables (ni width/height ni viewBox)');
+    const url = URL.createObjectURL(new Blob([ensureSvgSize(text, w, h)], { type: 'image/svg+xml' }));
+    try {
+      // <img> plutôt que createImageBitmap : c'est le moteur de rendu du navigateur,
+      // le seul chemin qui sache lire du SVG sur les quatre navigateurs.
+      const img = new Image();
+      await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = () => rej(new Error('SVG illisible (fichier corrompu ou incomplet ?)'));
+        img.src = url;
+      });
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      const blob = await new Promise(res => c.toBlob(res, 'image/png'));
+      if (!blob) throw new Error('rastérisation du SVG impossible');
+      // Même nom de fichier : le nom de sortie reste celui qu'attend l'utilisateur.
+      return new File([blob], file.name, { type: 'image/png' });
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
   async function handleFiles(fileList) {
     let files = Array.from(fileList).filter(f => {
       const ext = (f.name.split('.').pop() || '').toLowerCase();
@@ -2466,6 +2541,11 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
   }
 
   async function buildQueueItem(file, ext) {
+    // Poids d'origine mémorisé AVANT rastérisation : c'est le fichier que
+    // l'utilisateur a importé, et c'est à lui que la réduction se compare.
+    const originalSize = file.size;
+    if (ext === 'svg' || file.type === 'image/svg+xml') file = await rasterizeSvg(file);
+
     const objectUrl = URL.createObjectURL(file);
     let bitmap;
     try {
@@ -2498,7 +2578,7 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
       name: sanitizeBaseName(file.name),
       ext: sanitizeExt(ext),
       naturalWidth, naturalHeight,
-      originalSize: file.size,
+      originalSize,
       thumbUrl,
       baseThumbUrl: thumbUrl,  // vignette d'origine, restaurée si le recadrage est retiré
       objectUrl,
@@ -2557,8 +2637,12 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
       (item.status === 'error' ? ' is-error' : '');
     card.dataset.id = item.id;
 
+    // Le signe se déduit du résultat : une sortie plus lourde que la source existe
+    // (SVG rastérisé, PNG déjà optimisé, sans-perte sur une photo) et doit s'afficher
+    // en « + » rouge, pas en « - » vert. Même règle que le verdict du comparateur.
+    const gainPct = item.originalSize ? Math.round(100 - (item.resultSize / item.originalSize) * 100) : 0;
     const metaLine = item.status === 'done'
-      ? `<span>${formatBytes(item.originalSize)}</span><span class="arrow">→</span><span class="new-size">${formatBytes(item.resultSize)}</span><span class="gain">-${Math.round(100 - (item.resultSize / item.originalSize) * 100)}%</span>${item.targetMissed ? '<span class="target-miss" title="La cible de poids n’a pas pu être tenue, même en basse qualité">cible dépassée</span>' : ''}`
+      ? `<span>${formatBytes(item.originalSize)}</span><span class="arrow">→</span><span class="new-size">${formatBytes(item.resultSize)}</span><span class="${gainPct >= 0 ? 'gain' : 'loss'}">${gainPct >= 0 ? '−' : '+'}${Math.abs(gainPct)}%</span>${item.targetMissed ? '<span class="target-miss" title="La cible de poids n’a pas pu être tenue, même en basse qualité">cible dépassée</span>' : ''}`
       : `<span>${item.naturalWidth}×${item.naturalHeight}</span><span class="arrow">·</span><span>${formatBytes(item.originalSize)}</span>`;
 
     card.innerHTML = `
