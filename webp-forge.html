@@ -2183,41 +2183,53 @@ var Module=typeof Module!="undefined"?Module:{};var readyPromiseResolve,readyPro
      — pixels bruts pour le BMP, PNG encodé pour l'ICO — et l'emballage se fait ici.
      C'est peu coûteux (une recopie d'octets) et ça évite de dupliquer ce code. */
 
-  // BMP 32 bits avec canal alpha (BITMAPV4HEADER + BI_BITFIELDS). Le 24 bits serait
-  // plus compact mais écraserait la transparence ; on privilégie la fidélité.
+  // BMP 24 bits BI_RGB non compressé (BITMAPINFOHEADER classique). C'EST la seule
+  // variante de BMP lue partout : macOS (Preview, Quick Look, Finder), Windows, les
+  // navigateurs, les vieux logiciels. La version 32 bits BITMAPV4HEADER + BI_BITFIELDS
+  // qu'on écrivait avant, pensée pour garder l'alpha, était REFUSÉE par ImageIO
+  // (macOS) — fichiers de sortie « non visibles » (constat Stefan, 2026-07-23).
+  // Le BMP est un format d'échange hérité, sans support fiable de la transparence :
+  // on aplatit donc sur blanc (identique pour une image opaque, le cas courant). Qui
+  // a besoin de transparence exporte en PNG.
   function bmpFromRgba(rgba, w, h) {
-    const HEADER = 14, DIB = 108, pixels = w * h * 4;
-    const buf = new ArrayBuffer(HEADER + DIB + pixels);
+    const HEADER = 14, DIB = 40;
+    const rowRaw = w * 3;
+    const rowPad = (rowRaw + 3) & ~3;                 // lignes alignées sur 4 octets (exigé)
+    const imgSize = rowPad * h;
+    const buf = new ArrayBuffer(HEADER + DIB + imgSize);
     const dv = new DataView(buf);
     // BITMAPFILEHEADER
     dv.setUint8(0, 0x42); dv.setUint8(1, 0x4D);       // "BM"
     dv.setUint32(2, buf.byteLength, true);
-    dv.setUint32(10, HEADER + DIB, true);             // offset des pixels
-    // BITMAPV4HEADER
-    dv.setUint32(14, DIB, true);
+    dv.setUint32(10, HEADER + DIB, true);             // offset des pixels (54)
+    // BITMAPINFOHEADER
+    dv.setUint32(14, DIB, true);                      // taille de l'en-tête = 40
     dv.setInt32(18, w, true);
     dv.setInt32(22, h, true);                         // positif : lignes de bas en haut
     dv.setUint16(26, 1, true);                        // plans
-    dv.setUint16(28, 32, true);                       // bits par pixel
-    dv.setUint32(30, 3, true);                        // BI_BITFIELDS
-    dv.setUint32(34, pixels, true);
+    dv.setUint16(28, 24, true);                       // bits par pixel
+    dv.setUint32(30, 0, true);                        // BI_RGB (aucune compression)
+    dv.setUint32(34, imgSize, true);
     dv.setInt32(38, 2835, true); dv.setInt32(42, 2835, true);  // ~72 dpi
-    // Masques : l'octet de poids faible du DWORD little-endian est le bleu (ordre BGRA)
-    dv.setUint32(54, 0x00FF0000, true);               // rouge
-    dv.setUint32(58, 0x0000FF00, true);               // vert
-    dv.setUint32(62, 0x000000FF, true);               // bleu
-    dv.setUint32(66, 0xFF000000, true);               // alpha
-    dv.setUint32(70, 0x57696E20, false);              // espace colorimétrique "Win "
-    // Pixels : RGBA (canvas) -> BGRA, et dernière ligne en premier
+    // Pixels : RGBA (canvas) -> BGR, dernière ligne en premier, remplissage à 0.
+    // Aplatissement sur blanc : pour un pixel opaque (a=255) le résultat est inchangé.
     const out = new Uint8Array(buf, HEADER + DIB);
     for (let y = 0; y < h; y++) {
-      let src = (h - 1 - y) * w * 4, dst = y * w * 4;
-      for (let x = 0; x < w; x++, src += 4, dst += 4) {
-        out[dst]     = rgba[src + 2];   // B
-        out[dst + 1] = rgba[src + 1];   // G
-        out[dst + 2] = rgba[src];       // R
-        out[dst + 3] = rgba[src + 3];   // A
+      let src = (h - 1 - y) * w * 4, dst = y * rowPad;
+      for (let x = 0; x < w; x++, src += 4, dst += 3) {
+        const a = rgba[src + 3];
+        if (a === 255) {
+          out[dst]     = rgba[src + 2];   // B
+          out[dst + 1] = rgba[src + 1];   // G
+          out[dst + 2] = rgba[src];       // R
+        } else {
+          const k = a / 255, ik = 255 * (1 - k);
+          out[dst]     = (rgba[src + 2] * k + ik) | 0;   // B sur blanc
+          out[dst + 1] = (rgba[src + 1] * k + ik) | 0;   // G sur blanc
+          out[dst + 2] = (rgba[src]     * k + ik) | 0;   // R sur blanc
+        }
       }
+      // les octets de remplissage restent à 0 (ArrayBuffer neuf)
     }
     return new Blob([buf], { type: 'image/bmp' });
   }
